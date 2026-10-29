@@ -1,0 +1,17 @@
+# 二进制资源不要做换行转换，否则部署后 wasm/模型会损坏
+*.wasm   binary
+*.data   binary
+*.tflite binary
+*.png    binary
+*.ico    binary
+
+# 文本文件统一用 LF（bat 必须 CRLF）
+*.js         text eol=lf
+*.mjs        text eol=lf
+*.html       text eol=lf
+*.css        text eol=lf
+*.md         text eol=lf
+*.json       text eol=lf
+*.webmanifest text eol=lf
+*.py         text eol=lf
+*.bat        text eol=crlf

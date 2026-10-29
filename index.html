@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>手势花朵 · 握拳含苞 · 张手绽放</title>
+
+<!-- PWA / 手机添加到主屏幕 -->
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="theme-color" content="#0a0a0f" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="手势花朵" />
+<link rel="apple-touch-icon" href="./icons/icon-180.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0f;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    height: 100dvh;
+    width: 100vw;
+  }
+
+  #app {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+
+  canvas { display: block; }
+
+  /* 摄像头预览（小窗，叠加在角落） */
+  #video-preview {
+    position: absolute;
+    bottom: 24px;
+    right: 24px;
+    width: 180px;
+    height: 135px;
+    border-radius: 12px;
+    border: 2px solid rgba(255,255,255,0.15);
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.85;
+    z-index: 10;
+    pointer-events: none;
+    background: #111;
+  }
+
+  /* 状态指示 */
+  #status-bar {
+    position: absolute;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: 40px;
+    padding: 10px 24px;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  #status-icon {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    transition: background 0.4s, box-shadow 0.4s;
+  }
+  #status-icon.closed { background: #ff4d6a; box-shadow: 0 0 10px #ff4d6a; }
+  #status-icon.open   { background: #ff9ec4; box-shadow: 0 0 14px #ff6b9d; }
+  #status-icon.loading{ background: #f0c040; box-shadow: 0 0 10px #f0c040; animation: pulse 1s infinite; }
+
+  #status-text {
+    color: #ccc;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+
+  /* 引导提示 */
+  #guide {
+    position: absolute;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.5);
+    font-size: 13px;
+    letter-spacing: 1px;
+    transition: opacity 0.8s;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  /* loading 遮罩 */
+  #loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #0a0a0f;
+    z-index: 100;
+    transition: opacity 0.5s;
+  }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  #loading .spinner {
+    width: 48px;
+    height: 48px;
+    border: 3px solid rgba(255,255,255,0.1);
+    border-top-color: #ff9ec4;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  #loading .label {
+    margin-top: 18px;
+    color: #888;
+    font-size: 14px;
+    letter-spacing: 1px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <canvas id="gl"></canvas>
+  <video id="video-preview" autoplay playsinline muted></video>
+
+  <div id="status-bar">
+    <div id="status-icon" class="loading"></div>
+    <span id="status-text">正在加载手势模型…</span>
+  </div>
+
+  <div id="guide">✋ 左手张开=花朵绽放 · 右手张开=爱心绽放 · 手靠近镜头=钻进粒子内部</div>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <div class="label">手势识别模型加载中…</div>
+  </div>
+</div>
+
+<!-- Three.js import map -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./libs/three/three.module.js"
+  }
+}
+</script>
+
+<!-- MediaPipe Hands (UMD) -->
+<script src="./libs/hands/hands.js"></script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ============================================================
+// DOM 引用
+// ============================================================
+const canvas = document.getElementById('gl');
+const videoEl = document.getElementById('video-preview');
+const statusIcon = document.getElementById('status-icon');
+const statusText = document.getElementById('status-text');
+const guideEl = document.getElementById('guide');
+const loadingEl = document.getElementById('loading');
+
+// ============================================================
+// Three.js 初始化
+// ============================================================
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x0a0a0f);
+
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 50);
+camera.position.z = 6;
+
+// ============================================================
+// 背景星空
+// ============================================================
+{
+  const starsGeo = new THREE.BufferGeometry();
+  const count = 600;
+  const positions = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    positions[i * 3]     = (Math.random() - 0.5) * 14;
+    positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
+    positions[i * 3 + 2] = -2 - Math.random() * 8;
+  }
+  starsGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const starsMat = new THREE.PointsMaterial({
+    color: 0x8899cc,
+    size: 0.012,
+    transparent: true,
+    opacity: 0.6,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  scene.add(new THREE.Points(starsGeo, starsMat));
+}
+
+// ============================================================
+// 粒子光晕贴图（Canvas 生成径向渐变圆）
+// ============================================================
+function createGlowTexture(innerColor, outerColor, size = 128) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const half = size / 2;
+  const gradient = ctx.createRadialGradient(half, half, 0, half, half, half);
+  gradient.addColorStop(0, innerColor);
+  gradient.addColorStop(0.15, innerColor);
+  gradient.addColorStop(0.5, outerColor);
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(c);
+}
+
+const glowTexPink  = createGlowTexture('rgba(255,180,210,1)', 'rgba(255,90,140,0.3)');
+const glowTexWhite = createGlowTexture('rgba(255,240,250,1)', 'rgba(255,180,200,0.2)');
+const glowTexGold  = createGlowTexture('rgba(255,220,80,1)',  'rgba(255,160,30,0.3)');
+const glowTexSpark = createGlowTexture('rgba(255,255,255,1)','rgba(200,220,255,0.2)');
+
+// ============================================================
+// 花朵粒子系统
+// ============================================================
+const PETAL_COUNT = 5;
+const PARTICLES_PER_PETAL = 350;
+const PISTIL_COUNT = 400;    // 花蕊
+const SPARK_COUNT = 200;     // 飘散光点
+
+// ---- 花瓣 ----
+const petalPositions = new Float32Array(PETAL_COUNT * PARTICLES_PER_PETAL * 3);
+const petalColors     = new Float32Array(PETAL_COUNT * PARTICLES_PER_PETAL * 3);
+const petalBaseData   = []; // 存储每个粒子的基础参数，用于绽放计算
+
+const petalGeo = new THREE.BufferGeometry();
+
+function buildPetalParticles() {
+  petalBaseData.length = 0;
+  const total = PETAL_COUNT * PARTICLES_PER_PETAL;
+
+  for (let p = 0; p < PETAL_COUNT; p++) {
+    const baseAngle = (p / PETAL_COUNT) * Math.PI * 2 - Math.PI / 2; // 第一片朝上
+
+    // 每片花瓣随机的长度和最大半宽（共用，保证单片花瓣轮廓一致）
+    const petalLen = 1.50 + Math.random() * 0.20;
+    const petalHalfW = 0.43 + Math.random() * 0.08;
+    const bend = (Math.random() - 0.5) * 0.30; // 花瓣整体倾斜
+
+    for (let j = 0; j < PARTICLES_PER_PETAL; j++) {
+      const idx = p * PARTICLES_PER_PETAL + j;
+
+      // s: 0(花瓣根部) → 1(花瓣尖端)
+      let s = Math.random();
+      s = 0.06 + s * 0.92;
+
+      // 宽度包络：根部收窄、中段饱满、尖端收口
+      const wEnv = Math.pow(Math.sin(Math.PI * Math.pow(s, 0.86)), 0.72);
+      const halfW = petalHalfW * wEnv;
+
+      // 横向偏移（粒子填充花瓣实体）
+      const lateral = (Math.random() * 2 - 1) * halfW;
+
+      // 沿花瓣轴的局部坐标
+      const lx = s * petalLen;
+      const ly = lateral + Math.sin(s * Math.PI) * bend * petalLen * 0.35;
+
+      // 旋转到该花瓣朝向
+      const ca = Math.cos(baseAngle);
+      const sa = Math.sin(baseAngle);
+      const bx = ca * lx - sa * ly;
+      const by = sa * lx + ca * ly;
+
+      // 微小随机偏移，边缘更自然
+      const rx = (Math.random() - 0.5) * 0.03;
+      const ry = (Math.random() - 0.5) * 0.03;
+
+      petalBaseData.push({
+        bx, by,
+        rx, ry,
+        baseAngle,
+        colorT: s,
+        randomPhase: Math.random() * Math.PI * 2,
+      });
+
+      // 初始位置（bloom=0 时全部在原点）
+      petalPositions[idx * 3]     = 0;
+      petalPositions[idx * 3 + 1] = 0;
+      petalPositions[idx * 3 + 2] = 0;
+
+      // 颜色：花心深粉 → 花瓣尖浅粉白
+      const innerColor = new THREE.Color().setHSL(0.95, 0.90, 0.58 + s * 0.18);
+      const outerColor = new THREE.Color().setHSL(0.935, 0.60, 0.88);
+      const col = innerColor.clone().lerp(outerColor, Math.pow(s, 1.6));
+      petalColors[idx * 3]     = col.r;
+      petalColors[idx * 3 + 1] = col.g;
+      petalColors[idx * 3 + 2] = col.b;
+    }
+  }
+
+  petalGeo.setAttribute('position', new THREE.BufferAttribute(petalPositions, 3));
+  petalGeo.setAttribute('color',    new THREE.BufferAttribute(petalColors, 3));
+}
+buildPetalParticles();
+
+const petalMat = new THREE.PointsMaterial({
+  size: 0.06,
+  map: glowTexPink,
+  vertexColors: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  transparent: true,
+  opacity: 0.9,
+});
+const petalPoints = new THREE.Points(petalGeo, petalMat);
+scene.add(petalPoints);
+
+// ---- 花蕊 ----
+const pistilPositions = new Float32Array(PISTIL_COUNT * 3);
+const pistilColors     = new Float32Array(PISTIL_COUNT * 3);
+const pistilBaseData   = [];
+
+const pistilGeo = new THREE.BufferGeometry();
+for (let i = 0; i < PISTIL_COUNT; i++) {
+  const angle = Math.random() * Math.PI * 2;
+  const dist  = Math.random() * 0.22;
+  const bx = Math.cos(angle) * dist;
+  const by = Math.sin(angle) * dist;
+  const bz = (Math.random() - 0.5) * 0.1;
+
+  pistilBaseData.push({ bx, by, bz });
+
+  pistilPositions[i * 3]     = 0;
+  pistilPositions[i * 3 + 1] = 0;
+  pistilPositions[i * 3 + 2] = 0;
+
+  const col = new THREE.Color().setHSL(0.13 + Math.random() * 0.08, 0.9, 0.55 + Math.random() * 0.4);
+  pistilColors[i * 3]     = col.r;
+  pistilColors[i * 3 + 1] = col.g;
+  pistilColors[i * 3 + 2] = col.b;
+}
+pistilGeo.setAttribute('position', new THREE.BufferAttribute(pistilPositions, 3));
+pistilGeo.setAttribute('color',    new THREE.BufferAttribute(pistilColors, 3));
+
+const pistilMat = new THREE.PointsMaterial({
+  size: 0.04,
+  map: glowTexGold,
+  vertexColors: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  transparent: true,
+});
+const pistilPoints = new THREE.Points(pistilGeo, pistilMat);
+scene.add(pistilPoints);
+
+// ---- 飘散光点 ----
+const sparkPositions = new Float32Array(SPARK_COUNT * 3);
+const sparkGeo = new THREE.BufferGeometry();
+const sparkData = [];
+for (let i = 0; i < SPARK_COUNT; i++) {
+  sparkPositions[i * 3]     = (Math.random() - 0.5) * 8;
+  sparkPositions[i * 3 + 1] = (Math.random() - 0.5) * 8;
+  sparkPositions[i * 3 + 2] = (Math.random() - 0.5) * 4;
+
+  sparkData.push({
+    baseX: sparkPositions[i * 3],
+    baseY: sparkPositions[i * 3 + 1],
+    vy: 0.3 + Math.random() * 1.2,
+    life: Math.random(),
+    speed: 0.4 + Math.random() * 1.0,
+    phase: Math.random() * Math.PI * 2,
+    amplitude: 0.3 + Math.random() * 1.5,
+  });
+}
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
+const sparkMat = new THREE.PointsMaterial({
+  size: 0.025,
+  map: glowTexSpark,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  transparent: true,
+  opacity: 0.7,
+  color: 0xffeedd,
+});
+const sparkPoints = new THREE.Points(sparkGeo, sparkMat);
+scene.add(sparkPoints);
+
+// ---- 手指光环 ----
+const haloGeo = new THREE.BufferGeometry();
+const haloPositions = new Float32Array(60 * 3);
+haloGeo.setAttribute('position', new THREE.BufferAttribute(haloPositions, 3));
+const haloMat = new THREE.PointsMaterial({
+  size: 0.09,
+  map: glowTexWhite,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  transparent: true,
+  opacity: 0.55,
+  color: 0xffccdd,
+});
+const haloPoints = new THREE.Points(haloGeo, haloMat);
+haloPoints.visible = false;
+scene.add(haloPoints);
+
+// ============================================================
+// 爱心粒子系统（右手）
+// ============================================================
+const HEART_COUNT = 2200;
+const heartPositions = new Float32Array(HEART_COUNT * 3);
+const heartColors     = new Float32Array(HEART_COUNT * 3);
+const heartBaseData   = [];
+
+const heartGeo = new THREE.BufferGeometry();
+
+// 爱心参数曲线
+function heartX(t) { return 16 * Math.pow(Math.sin(t), 3); }
+function heartY(t) { return 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t); }
+
+const heartScale = 0.06; // 缩小到合适大小
+const heartYOff = 0.36;  // 垂直居中（曲线原始范围 y: 5 ~ -17）
+
+for (let i = 0; i < HEART_COUNT; i++) {
+  const t = Math.random() * Math.PI * 2;
+  const isInterior = Math.random() < 0.45;
+
+  let bx, by, bz;
+  if (isInterior) {
+    // 内部填充：随机缩放到爱心内部
+    const f = Math.random() * 0.75;
+    bx = heartX(t) * heartScale * f;
+    by = heartY(t) * heartScale * f + heartYOff * (1 - f);
+  } else {
+    // 表面粒子，带厚度
+    const thick = 0.4 + Math.random() * 1.2;
+    const perpX = Math.cos(t) * (Math.random() - 0.5) * thick * heartScale;
+    const perpY = Math.sin(t) * (Math.random() - 0.5) * thick * heartScale;
+    bx = heartX(t) * heartScale + perpX;
+    by = heartY(t) * heartScale + perpY + heartYOff;
+  }
+  bz = (Math.random() - 0.5) * 0.35;
+
+  heartBaseData.push({ bx, by, bz });
+
+  heartPositions[i * 3]     = 0;
+  heartPositions[i * 3 + 1] = 0;
+  heartPositions[i * 3 + 2] = 0;
+
+  // 红色系渐变：深红→亮粉
+  const hue = 0.96 + Math.random() * 0.06;
+  const sat = 0.7 + Math.random() * 0.3;
+  const light = 0.35 + Math.random() * 0.45;
+  const col = new THREE.Color().setHSL(hue % 1, sat, light);
+  heartColors[i * 3]     = col.r;
+  heartColors[i * 3 + 1] = col.g;
+  heartColors[i * 3 + 2] = col.b;
+}
+
+heartGeo.setAttribute('position', new THREE.BufferAttribute(heartPositions, 3));
+heartGeo.setAttribute('color',    new THREE.BufferAttribute(heartColors, 3));
+
+const heartTex = createGlowTexture('rgba(255,120,150,1)', 'rgba(255,40,70,0.3)');
+const heartMat = new THREE.PointsMaterial({
+  size: 0.045,
+  map: heartTex,
+  vertexColors: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  transparent: true,
+  opacity: 0.85,
+});
+const heartPoints = new THREE.Points(heartGeo, heartMat);
+
+// 爱心光环
+const heartHaloGeo = new THREE.BufferGeometry();
+const heartHaloPos = new Float32Array(50 * 3);
+heartHaloGeo.setAttribute('position', new THREE.BufferAttribute(heartHaloPos, 3));
+const heartHaloMat = new THREE.PointsMaterial({
+  size: 0.08, map: glowTexWhite, blending: THREE.AdditiveBlending,
+  depthWrite: false, transparent: true, opacity: 0.5, color: 0xff8899,
+});
+const heartHaloPoints = new THREE.Points(heartHaloGeo, heartHaloMat);
+heartHaloPoints.visible = false;
+
+// 爱心 Group
+const heartGroup = new THREE.Group();
+heartGroup.add(heartPoints);
+heartGroup.add(heartHaloPoints);
+scene.add(heartGroup);
+
+// ============================================================
+// 花朵 Group（包含花瓣 + 花蕊，整体移动/缩放）
+// ============================================================
+const flowerGroup = new THREE.Group();
+// 先将已添加的独立 mesh 移到 group 中
+scene.remove(petalPoints);
+scene.remove(pistilPoints);
+scene.remove(haloPoints);
+flowerGroup.add(petalPoints);
+flowerGroup.add(pistilPoints);
+flowerGroup.add(haloPoints);
+scene.add(flowerGroup);
+
+// ============================================================
+// 状态变量
+// ============================================================
+// 左手 → 花朵，右手 → 爱心
+const handState = {
+  left:  { targetBloom:0, smoothBloom:0, targetX:0, targetY:0, smoothX:-1.2, smoothY:0.3,
+           detected:false, lastSeen:0, scale:0.16, smoothScale:0.16, zoom:0, zOffset:0 },
+  right: { targetBloom:0, smoothBloom:0, targetX:0, targetY:0, smoothX: 1.2, smoothY:0.3,
+           detected:false, lastSeen:0, scale:0.16, smoothScale:0.16, zoom:0, zOffset:0 },
+};
+let cameraReady = false;
+let idlePhase = 0;
+let anyHandEver = false;
+
+// ============================================================
+// 握拳检测：利用 MediaPipe 21 关键点
+// ============================================================
+function calcBloomFromLandmarks(landmarks) {
+  // 指尖索引
+  const tips = [4, 8, 12, 16, 20];
+  // 指根索引（MCP 关节）
+  const bases = [5, 5, 9, 13, 17]; // 拇指用 5 作为近似指根
+  // 手腕
+  const wrist = landmarks[0];
+
+  let totalRatio = 0;
+  for (let i = 0; i < tips.length; i++) {
+    const tip = landmarks[tips[i]];
+    const base = landmarks[bases[i]];
+
+    const tipToWrist = Math.hypot(tip.x - wrist.x, tip.y - wrist.y, tip.z - wrist.z);
+    const baseToWrist = Math.hypot(base.x - wrist.x, base.y - wrist.y, base.z - wrist.z);
+
+    if (baseToWrist > 0.001) {
+      const ratio = tipToWrist / baseToWrist;
+      // 张开时 ratio ≈ 1.5~2.0, 握拳时 ≈ 0.8~1.0
+      totalRatio += ratio;
+    }
+  }
+
+  const avgRatio = totalRatio / tips.length;
+  // 映射：avgRatio 约 0.8~2.0 → bloom 0~1
+  const minR = 0.85;
+  const maxR = 1.9;
+  return Math.max(0, Math.min(1, (avgRatio - minR) / (maxR - minR)));
+}
+
+// 计算手在画面中的尺寸（手腕到中指尖距离），用于缩放/进入效果
+function calcHandScale(landmarks) {
+  const wrist = landmarks[0];
+  const midTip = landmarks[12];
+  return Math.hypot(midTip.x - wrist.x, midTip.y - wrist.y, midTip.z - wrist.z);
+}
+
+// ============================================================
+// 坐标映射：MediaPipe 归一化坐标 → Three.js 世界坐标
+// ============================================================
+function mapHandToWorld(nx, ny) {
+  const aspect = window.innerWidth / window.innerHeight;
+  // MediaPipe: (0,0) 左上角，(1,1) 右下角
+  // Three.js 场景：x 左右，y 上下，相机在 z=6
+  const worldX = (nx - 0.5) * 2.5 * aspect;
+  const worldY = -(ny - 0.5) * 3.0;
+  return { x: worldX, y: worldY };
+}
+
+// ============================================================
+// 更新粒子位置（根据 bloom）
+// ============================================================
+function updateFlowerParticles(bloom, zSpread) {
+  zSpread = zSpread || 1;
+  // 花瓣
+  const posArr = petalGeo.attributes.position.array;
+  for (let i = 0; i < petalBaseData.length; i++) {
+    const d = petalBaseData[i];
+    const idx = i * 3;
+    // 花苞时粒子向内收缩并在 z 轴收拢
+    const b = bloom;
+    const zShrink = 0.1 + b * 0.9; // bloom=0 时 z 范围小
+    posArr[idx]     = (d.bx + d.rx) * b;
+    posArr[idx + 1] = (d.by + d.ry) * b;
+    posArr[idx + 2] = (Math.sin(d.randomPhase) * 0.28 + Math.cos(d.randomPhase * 1.7) * 0.18)
+                      * zShrink * b * zSpread;
+  }
+  petalGeo.attributes.position.needsUpdate = true;
+
+  // 花瓣尺寸随绽放
+  petalMat.size = (0.020 + bloom * 0.036) * (1 + (zSpread - 1) * 0.08);
+  petalMat.opacity = 0.45 + bloom * 0.55;
+
+  // 花蕊
+  const pisArr = pistilGeo.attributes.position.array;
+  for (let i = 0; i < pistilBaseData.length; i++) {
+    const d = pistilBaseData[i];
+    const idx = i * 3;
+    const b = bloom;
+    pisArr[idx]     = d.bx * b * 0.8;
+    pisArr[idx + 1] = d.by * b * 0.8;
+    pisArr[idx + 2] = d.bz * b * zSpread;
+  }
+  pistilGeo.attributes.position.needsUpdate = true;
+  pistilMat.size = 0.015 + bloom * 0.035;
+  pistilMat.opacity = 0.3 + bloom * 0.7;
+}
+
+// ============================================================
+// 更新爱心粒子（右手）
+// ============================================================
+function updateHeartParticles(bloom, zSpread) {
+  zSpread = zSpread || 1;
+  const posArr = heartGeo.attributes.position.array;
+  for (let i = 0; i < heartBaseData.length; i++) {
+    const d = heartBaseData[i];
+    const idx = i * 3;
+    const b = bloom;
+    const zShrink = 0.1 + b * 0.9;
+    posArr[idx]     = d.bx * b * 1.1;
+    posArr[idx + 1] = d.by * b * 1.1;
+    posArr[idx + 2] = d.bz * zShrink * b * zSpread;
+  }
+  heartGeo.attributes.position.needsUpdate = true;
+  heartMat.size = (0.02 + bloom * 0.04) * (1 + (zSpread - 1) * 0.08);
+  heartMat.opacity = 0.25 + bloom * 0.7;
+}
+
+// ============================================================
+// 通用光环更新
+// ============================================================
+function updateHaloGeneric(geo, mat, x, y, bloom, visible) {
+  const pts = geo.attributes.position.array;
+  const count = pts.length / 3;
+  if (!visible || bloom < 0.05) {
+    // 把所有粒子放到远处隐藏
+    for (let i = 0; i < count; i++) {
+      pts[i * 3] = pts[i * 3 + 1] = 999;
+    }
+    geo.attributes.position.needsUpdate = true;
+    return;
+  }
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    const r = 0.12 + bloom * 0.22;
+    pts[i * 3]     = x + Math.cos(angle) * r;
+    pts[i * 3 + 1] = y + Math.sin(angle) * r;
+    pts[i * 3 + 2] = (Math.random() - 0.5) * 0.05;
+  }
+  geo.attributes.position.needsUpdate = true;
+  mat.opacity = 0.15 + bloom * 0.5;
+}
+
+// ============================================================
+// 更新飘散光点（跟随双手平均位置）
+// ============================================================
+function updateSparks(dt, avgBloom, avgX, avgY) {
+  const arr = sparkGeo.attributes.position.array;
+  for (let i = 0; i < sparkData.length; i++) {
+    const sd = sparkData[i];
+    sd.life += sd.speed * dt;
+
+    if (sd.life > 1) {
+      sd.life = 0;
+      sd.baseX = avgX + (Math.random() - 0.5) * 2.5 * avgBloom;
+      sd.baseY = avgY + (Math.random() - 0.5) * 2.5 * avgBloom;
+      sd.vy = 0.3 + Math.random() * 1.2;
+    }
+
+    const t = sd.life;
+    const rise = -t * sd.vy * 2;
+    const sway = Math.sin(t * Math.PI * 3 + sd.phase) * sd.amplitude * t;
+    arr[i * 3]     = sd.baseX + sway;
+    arr[i * 3 + 1] = sd.baseY + rise;
+    arr[i * 3 + 2] = (Math.sin(sd.phase + t * 10) * 0.25) * avgBloom;
+  }
+  sparkGeo.attributes.position.needsUpdate = true;
+  sparkMat.opacity = 0.2 + avgBloom * 0.55;
+}
+
+// ============================================================
+// MediaPipe Hands 初始化
+// ============================================================
+const hands = new Hands({
+  locateFile: (file) => `./libs/hands/${file}`,
+});
+
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 0,   // 0 = 轻量模型（hand_landmark_lite，约 2MB），手机上加载更快
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.55,
+});
+
+hands.onResults((results) => {
+  const now = performance.now();
+
+  // 重置双手检测状态
+  handState.left.detected = false;
+  handState.right.detected = false;
+
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    anyHandEver = true;
+
+    for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+      const lm = results.multiHandLandmarks[i];
+      const handedness = results.multiHandedness[i];
+      // MediaPipe 的 handedness 默认假设输入是镜像画面；未镜像的摄像头需要交换左右
+      // 若发现左右手反了，把 SWAP_HANDEDNESS 改为 false 即可
+      const SWAP_HANDEDNESS = true;
+      const rawLabel = (handedness && handedness.label) || 'Right';
+      const isLeftHand = SWAP_HANDEDNESS ? (rawLabel === 'Right') : (rawLabel === 'Left');
+      const side = isLeftHand ? 'left' : 'right';
+      const hs = handState[side];
+
+      hs.detected = true;
+      hs.lastSeen = now;
+
+      // 食指指尖位置
+      const tip = lm[8];
+      const mapped = mapHandToWorld(tip.x, tip.y);
+      hs.targetX = mapped.x;
+      hs.targetY = mapped.y;
+
+      // 绽放值
+      hs.targetBloom = calcBloomFromLandmarks(lm);
+
+      // 手的大小（用于缩放/进入效果）
+      hs.scale = calcHandScale(lm);
+    }
+  }
+
+  // 未检测到的手：超过 1.5 秒后逐渐闭合
+  for (const side of ['left', 'right']) {
+    const hs = handState[side];
+    if (!hs.detected && now - hs.lastSeen > 1500) {
+      hs.targetBloom = Math.max(0, hs.targetBloom - 0.02);
+    }
+  }
+});
+
+// ============================================================
+// 摄像头初始化
+// ============================================================
+async function initCamera() {
+  try {
+    console.log('[手势花朵] 请求摄像头权限…');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' },
+    });
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    console.log('[手势花朵] 摄像头已就绪');
+
+    cameraReady = true;
+
+    // 手动帧处理：等上一帧识别完成后再取下一帧
+    let frameRunning = false;
+    let sendErrors = 0;
+    async function processFrame() {
+      if (frameRunning) return;
+      frameRunning = true;
+      try {
+        await hands.send({ image: videoEl });
+        sendErrors = 0; // 成功后重置
+      } catch (e) {
+        sendErrors++;
+        if (sendErrors <= 3) {
+          console.warn('[手势花朵] MediaPipe send 失败:', e.message);
+        }
+        // 连续失败太多则暂停，等模型就绪
+        if (sendErrors > 10) {
+          await new Promise(r => setTimeout(r, 2000));
+          sendErrors = 0;
+        }
+      }
+      frameRunning = false;
+      requestAnimationFrame(processFrame);
+    }
+    processFrame();
+
+    // 隐藏 loading
+    loadingEl.classList.add('hidden');
+    updateStatus('open', '等待手势 — 张开手掌试试 ✋');
+    guideEl.style.opacity = '1';
+
+  } catch (err) {
+    console.error('[手势花朵] 摄像头初始化失败:', err.message);
+    loadingEl.classList.add('hidden'); // 关键：失败也要隐藏 loading
+    cameraReady = false;
+
+    if (err.name === 'NotAllowedError') {
+      updateStatus('closed', '摄像头权限被拒绝 — 请刷新后点击地址栏左侧允许');
+    } else if (err.name === 'NotFoundError') {
+      updateStatus('closed', '未检测到摄像头设备');
+    } else {
+      updateStatus('closed', '摄像头错误: ' + err.message.slice(0, 30));
+    }
+    guideEl.style.opacity = '0.6';
+    guideEl.textContent = '⚠ 摄像头未就绪 — 花朵将展示呼吸动画';
+  }
+}
+
+// ============================================================
+// UI 状态更新
+// ============================================================
+function updateStatus(state, text) {
+  statusIcon.className = state;
+  statusText.textContent = text;
+}
+
+// ============================================================
+// 渲染循环
+// ============================================================
+const clock = new THREE.Clock();
+
+// 辅助：对手状态做平滑+缩放计算
+function smoothHand(side, dt) {
+  const hs = handState[side];
+  hs.smoothBloom += (hs.targetBloom - hs.smoothBloom) * Math.min(8 * dt, 1);
+  hs.smoothX += (hs.targetX - hs.smoothX) * Math.min(10 * dt, 1);
+  hs.smoothY += (hs.targetY - hs.smoothY) * Math.min(10 * dt, 1);
+  hs.smoothScale += (hs.scale - hs.smoothScale) * Math.min(6 * dt, 1);
+  // 归一化缩放 0~1：手越大越接近 1
+  const normScale = Math.max(0, Math.min(1, (hs.smoothScale - 0.10) / 0.40));
+  hs.zoom = normScale;
+  // 平滑后的推进量，避免镜头抖动
+  hs.zOffset += (normScale * 8.0 - hs.zOffset) * Math.min(4 * dt, 1);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const now = performance.now();
+  const leftHS  = handState.left;
+  const rightHS = handState.right;
+
+  // ---- 空闲呼吸动画 ----
+  const anyHandNear = (leftHS.detected && (now - leftHS.lastSeen < 2000))
+                   || (rightHS.detected && (now - rightHS.lastSeen < 2000));
+
+  if (!cameraReady || (!anyHandNear && !anyHandEver)) {
+    // 从未检测到手 / 摄像头未就绪：两个形状分列左右缓慢呼吸
+    idlePhase += dt * 1.2;
+    const breath = 0.25 + Math.sin(idlePhase) * 0.15;
+    leftHS.targetBloom  += (breath - leftHS.targetBloom)  * Math.min(3 * dt, 1);
+    rightHS.targetBloom += (breath - rightHS.targetBloom) * Math.min(3 * dt, 1);
+    leftHS.targetX  += (-1.1 - leftHS.targetX)  * Math.min(1.5 * dt, 1);
+    leftHS.targetY  += (0.25 - leftHS.targetY) * Math.min(1.5 * dt, 1);
+    rightHS.targetX += (1.1 - rightHS.targetX) * Math.min(1.5 * dt, 1);
+    rightHS.targetY += (0.25 - rightHS.targetY) * Math.min(1.5 * dt, 1);
+  } else if (!anyHandNear) {
+    // 手离开后：保持原地呼吸，不再移动位置
+    idlePhase += dt * 1.2;
+    const breath = 0.25 + Math.sin(idlePhase) * 0.15;
+    leftHS.targetBloom  += (breath - leftHS.targetBloom)  * Math.min(3 * dt, 1);
+    rightHS.targetBloom += (breath - rightHS.targetBloom) * Math.min(3 * dt, 1);
+  }
+
+  // 双手平滑
+  smoothHand('left', dt);
+  smoothHand('right', dt);
+
+  // 手消失时，缩放缓慢回落到初始（避免镜头卡在粒子内部）
+  if (!leftHS.detected && now - leftHS.lastSeen > 600) {
+    leftHS.smoothScale += (0.16 - leftHS.smoothScale) * Math.min(2.5 * dt, 1);
+  }
+  if (!rightHS.detected && now - rightHS.lastSeen > 600) {
+    rightHS.smoothScale += (0.16 - rightHS.smoothScale) * Math.min(2.5 * dt, 1);
+  }
+
+  // ========== 镜头缩放：双手越大，镜头越推进 ==========
+  const maxZoom = Math.max(leftHS.zoom, rightHS.zoom);
+  const targetCamZ = 6 - maxZoom * 4.6;      // 6 → 1.4（保持能看到粒子结构）
+  camera.position.z += (targetCamZ - camera.position.z) * Math.min(6 * dt, 1);
+
+  // 粒子在 z 轴展开成立体云团，镜头推进时才会真正"进入"内部
+  const flowerZSpread = 1 + leftHS.zoom * 9;
+  const heartZSpread  = 1 + rightHS.zoom * 9;
+
+  // ---- 花朵（左手） ----
+  updateFlowerParticles(leftHS.smoothBloom, flowerZSpread);
+  // 放大时向画面中心靠拢，镜头才能笔直"钻进去"
+  const fCenter = 1 - leftHS.zoom * 0.92;
+  flowerGroup.position.x = leftHS.smoothX * fCenter;
+  flowerGroup.position.y = leftHS.smoothY * fCenter;
+  flowerGroup.scale.setScalar(1 + leftHS.zoom * 0.6);
+  flowerGroup.rotation.z += (leftHS.smoothX * 0.15 - flowerGroup.rotation.z) * 3 * dt;
+  haloPoints.visible = leftHS.detected && leftHS.smoothBloom > 0.05;
+  updateHaloGeneric(haloGeo, haloMat, 0, 0,
+                    leftHS.smoothBloom, haloPoints.visible);
+
+  // ---- 爱心（右手） ----
+  updateHeartParticles(rightHS.smoothBloom, heartZSpread);
+  const hCenter = 1 - rightHS.zoom * 0.92;
+  heartGroup.position.x = rightHS.smoothX * hCenter;
+  heartGroup.position.y = rightHS.smoothY * hCenter;
+  heartGroup.scale.setScalar(1 + rightHS.zoom * 0.6);
+  heartGroup.rotation.z += (rightHS.smoothX * 0.15 - heartGroup.rotation.z) * 3 * dt;
+  heartHaloPoints.visible = rightHS.detected && rightHS.smoothBloom > 0.05;
+  updateHaloGeneric(heartHaloGeo, heartHaloMat, 0, 0,
+                    rightHS.smoothBloom, heartHaloPoints.visible);
+
+  // ---- 飘散光点（平均位置） ----
+  const avgBloom = (leftHS.smoothBloom + rightHS.smoothBloom) * 0.5;
+  const avgX = (leftHS.smoothX + rightHS.smoothX) * 0.5;
+  const avgY = (leftHS.smoothY + rightHS.smoothY) * 0.5;
+  updateSparks(dt, avgBloom, avgX, avgY);
+  sparkPoints.position.set(avgX, avgY, 0);
+
+  // ---- UI ----
+  if (!cameraReady) { /* 不变 */ }
+  else if (!anyHandNear && anyHandEver) {
+    updateStatus('closed', '未检测到手掌 — 呼吸模式');
+    guideEl.style.opacity = '1';
+  } else if (leftHS.smoothBloom < 0.3 && rightHS.smoothBloom < 0.3) {
+    updateStatus('closed', '握拳 — 花苞+爱心 🌱❤️');
+  } else {
+    updateStatus('open', '张手 — 绽放中 🌸❤️');
+    guideEl.style.opacity = Math.max(0, parseFloat(guideEl.style.opacity) - dt * 0.8);
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ============================================================
+// 响应窗口大小变化
+// ============================================================
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ============================================================
+// 启动
+// ============================================================
+updateFlowerParticles(0);
+updateHeartParticles(0);
+animate();
+initCamera();
+
+// 兜底：摄像头长时间没有响应（权限弹窗被忽略等）时，先让场景显示出来
+setTimeout(() => {
+  if (!cameraReady) {
+    loadingEl.classList.add('hidden');
+    if (statusText.textContent.indexOf('加载') >= 0) {
+      updateStatus('loading', '摄像头未就绪 · 请刷新页面重新允许');
+    }
+  }
+}, 10000);
+
+// ============================================================
+// Service Worker（离线缓存 / 手机上二次打开秒开）
+// ============================================================
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch((e) => {
+      console.warn('[手势花朵] ServiceWorker 注册失败（不影响使用）:', e.message);
+    });
+  });
+}
+</script>
+
+</body>
+</html>
