@@ -1,7 +1,7 @@
 /* 手势花朵 · 离线缓存
  * 改动代码后记得把 CACHE 版本号 +1，否则手机上会一直用旧缓存
  */
-const CACHE = 'hand-flower-v1';
+const CACHE = 'hand-flower-v2';
 
 const PRECACHE = [
   './',
