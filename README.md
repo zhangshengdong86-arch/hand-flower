@@ -27,7 +27,9 @@ hand-flower/
 │       ├── hand_landmark_full.tflite   （备用高精度，约 5.5MB，默认不加载）
 │       └── hands_solution_*.wasm / *.data
 ├── make_icons.py            图标生成脚本（改样式后重跑）
-├── upload.bat               一键推送到 GitHub Pages
+├── upload.bat               首次推送 / 只推送不升版本
+├── 发布更新.bat             日常发布：升缓存版本 + 提交 + 推送（推荐）
+├── bump-cache.ps1           被 发布更新.bat 调用，负责把版本号 +1
 └── README.md
 ```
 
@@ -109,11 +111,25 @@ https://zhangshengdong86-arch.github.io/hand-flower/
 
 ## 更新代码后
 
-改了 `index.html` 或样式后：
+改了 `index.html` 或样式后，两个办法：
 
-1. 本地刷新测试
-2. 把 `sw.js` 第一行的 `CACHE` 版本号 +1（例如 `hand-flower-v1` → `hand-flower-v2`），否则手机上会一直用旧缓存
-3. 双击 `upload.bat` 重新推送
+### 办法一：双击 `发布更新.bat`（推荐）
+
+它会自动做三件事：
+
+1. 把 `sw.js` 里的 `CACHE` 版本号 +1（`hand-flower-v1` → `hand-flower-v2`）
+2. `git add` + `commit`
+3. `git push` 到 GitHub
+
+等约 1 分钟，手机上刷新页面就是新版。
+
+### 办法二：手动改
+
+1. 用记事本打开 `sw.js`，找到第 4 行：`const CACHE = 'hand-flower-v1';`
+2. 把 `v1` 改成 `v2`（下次改 `v3`，一直往上加）
+3. 保存后双击 `upload.bat` 推送
+
+> 为什么要做这一步：Service Worker 会优先读本地缓存。版本号不变，浏览器就认为缓存还是最新的，永远拿不到新代码。改个名字等于告诉浏览器「旧的作废了」。
 
 ## 性能
 
